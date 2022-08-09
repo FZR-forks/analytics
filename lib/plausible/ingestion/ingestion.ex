@@ -1,13 +1,23 @@
 defmodule Plausible.Ingestion do
   require OpenTelemetry.Tracer, as: Tracer
 
+  @type location_details :: %{
+          country_code: integer() | nil,
+          subdivision1_code: integer() | nil,
+          subdivision2_code: integer() | nil,
+          city_geoname_id: integer() | nil
+        }
+
+  @type user_agent :: UAInspector.Result.t() | UAInspector.Result.Bot.t() | nil
+
   @no_domain_error {:error, %{domain: ["can't be blank"]}}
 
-  def add_to_buffer(%Plausible.Ingestion.Request{} = request) do
+  def add_to_buffer(%Plausible.Ingestion.Request{} = request, ua \\ nil, location_details \\ nil) do
     ua =
-      Tracer.with_span "parse_user_agent" do
-        parse_user_agent(request)
-      end
+      ua ||
+        Tracer.with_span "parse_user_agent" do
+          parse_user_agent(request)
+        end
 
     blacklist_domain = request.params.domain in Application.get_env(:plausible, :domain_blacklist)
 
@@ -21,9 +31,10 @@ defmodule Plausible.Ingestion do
       ref = parse_referrer(uri, request.params.referrer)
 
       location_details =
-        Tracer.with_span "parse_visitor_location" do
-          visitor_location_details(request)
-        end
+        location_details ||
+          Tracer.with_span "parse_visitor_location" do
+            visitor_location_details(request)
+          end
 
       salts = Plausible.Session.Salts.fetch()
 
@@ -53,36 +64,42 @@ defmodule Plausible.Ingestion do
         "meta.value": Map.values(request.params.meta) |> Enum.map(&Kernel.to_string/1)
       }
 
-      Enum.reduce_while(get_domains(request, uri), @no_domain_error, fn domain, _res ->
-        user_id = generate_user_id(request, domain, event_attrs[:hostname], salts[:current])
+      response =
+        Enum.reduce_while(get_domains(request, uri), @no_domain_error, fn domain, _res ->
+          user_id = generate_user_id(request, domain, event_attrs[:hostname], salts[:current])
 
-        previous_user_id =
-          salts[:previous] &&
-            generate_user_id(request, domain, event_attrs[:hostname], salts[:previous])
+          previous_user_id =
+            salts[:previous] &&
+              generate_user_id(request, domain, event_attrs[:hostname], salts[:previous])
 
-        changeset =
-          event_attrs
-          |> Map.merge(%{domain: domain, user_id: user_id})
-          |> Plausible.ClickhouseEvent.new()
+          changeset =
+            event_attrs
+            |> Map.merge(%{domain: domain, user_id: user_id})
+            |> Plausible.ClickhouseEvent.new()
 
-        if changeset.valid? do
-          event = Ecto.Changeset.apply_changes(changeset)
+          if changeset.valid? do
+            event = Ecto.Changeset.apply_changes(changeset)
 
-          session_id =
-            Tracer.with_span "cache_store_event" do
-              Plausible.Session.CacheStore.on_event(event, previous_user_id)
-            end
+            session_id =
+              Tracer.with_span "cache_store_event" do
+                Plausible.Session.CacheStore.on_event(event, previous_user_id)
+              end
 
-          event
-          |> Map.put(:session_id, session_id)
-          |> Plausible.Event.WriteBuffer.insert()
+            event
+            |> Map.put(:session_id, session_id)
+            |> Plausible.Event.WriteBuffer.insert()
 
-          {:cont, :ok}
-        else
-          errors = Ecto.Changeset.traverse_errors(changeset, &encode_error/1)
-          {:halt, {:error, errors}}
-        end
-      end)
+            {:cont, :ok}
+          else
+            errors = Ecto.Changeset.traverse_errors(changeset, &encode_error/1)
+            {:halt, {:error, errors}}
+          end
+        end)
+
+      case response do
+        :ok -> {:ok, {ua, location_details}}
+        any -> any
+      end
     end
   end
 
@@ -479,7 +496,7 @@ defmodule Plausible.Ingestion do
     source || PlausibleWeb.RefInspector.parse(ref)
   end
 
-  defp parse_user_agent(%Plausible.Ingestion.Request{} = request) do
+  def parse_user_agent(%Plausible.Ingestion.Request{} = request) do
     if user_agent = request.headers["user-agent"] do
       res =
         Cachex.fetch(:user_agents, user_agent, fn ua ->
