@@ -149,7 +149,7 @@ defmodule Plausible.Google.HTTP do
 
       %{body: body} ->
         body
-        |> Jason.decode!(body)
+        |> Jason.decode!()
         |> Map.get("error")
         |> then(&{:error, &1})
     end
