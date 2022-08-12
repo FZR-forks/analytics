@@ -138,16 +138,18 @@ defmodule Plausible.Google.HTTP do
   defp property_base_url(url), do: url
 
   def refresh_auth_token(refresh_token) do
-    "https://www.googleapis.com/oauth2/v4/token"
-    |> HTTPoison.post!(
-      "client_id=#{client_id()}&client_secret=#{client_secret()}&refresh_token=#{refresh_token}&grant_type=refresh_token&redirect_uri=#{redirect_uri()}",
-      "Content-Type": "application/x-www-form-urlencoded"
+    :post
+    |> Finch.build(
+      "https://www.googleapis.com/oauth2/v4/token",
+      [{"Content-Type", "application/x-www-form-urlencoded"}],
+      "client_id=#{client_id()}&client_secret=#{client_secret()}&refresh_token=#{refresh_token}&grant_type=refresh_token&redirect_uri=#{redirect_uri()}"
     )
+    |> Finch.request(Plausible.Finch)
     |> case do
-      %{body: body, status_code: 200} ->
+      {:ok, %{body: body, status: 200}} ->
         {:ok, Jason.decode!(body)}
 
-      %{body: body} ->
+      {:ok, %{body: body}} ->
         body
         |> Jason.decode!()
         |> Map.get("error")
