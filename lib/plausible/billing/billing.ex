@@ -1,6 +1,6 @@
 defmodule Plausible.Billing do
   use Plausible.Repo
-  alias Plausible.Billing.{Subscription, PaddleApi}
+  alias Plausible.Billing.Subscription
 
   def active_subscription_for(user_id) do
     Repo.get_by(Subscription, user_id: user_id, status: "active")
@@ -113,7 +113,16 @@ defmodule Plausible.Billing do
   end
 
   def change_plan_preview(subscription, new_plan_id) do
-    PaddleApi.update_subscription_preview(subscription.paddle_subscription_id, new_plan_id)
+    case paddle_api().update_subscription_preview(
+           subscription.paddle_subscription_id,
+           new_plan_id
+         ) do
+      {:ok, response} ->
+        {:ok, response}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
   end
 
   def needs_to_upgrade?(%Plausible.Auth.User{trial_expiry_date: nil}), do: {true, :no_trial}
@@ -122,12 +131,9 @@ defmodule Plausible.Billing do
     trial_is_over = Timex.before?(user.trial_expiry_date, Timex.today())
     subscription_active = subscription_is_active?(user.subscription)
 
-    grace_period_ended =
-      user.grace_period && Timex.before?(user.grace_period.end_date, Timex.today())
-
     cond do
       trial_is_over && !subscription_active -> {true, :no_active_subscription}
-      grace_period_ended -> {true, :grace_period_ended}
+      Plausible.Auth.GracePeriod.expired?(user) -> {true, :grace_period_ended}
       true -> false
     end
   end
@@ -159,17 +165,16 @@ defmodule Plausible.Billing do
 
   def last_two_billing_months_usage(user, today \\ Timex.today()) do
     {first, second} = last_two_billing_cycles(user, today)
-    sites = Plausible.Sites.owned_by(user)
+    domains = Plausible.Sites.owned_sites_domains(user)
 
-    usage_for_sites = fn sites, date_range ->
-      domains = Enum.map(sites, & &1.domain)
+    usage_for_sites = fn domains, date_range ->
       {pageviews, custom_events} = Plausible.Stats.Clickhouse.usage_breakdown(domains, date_range)
       pageviews + custom_events
     end
 
     {
-      usage_for_sites.(sites, first),
-      usage_for_sites.(sites, second)
+      usage_for_sites.(domains, first),
+      usage_for_sites.(domains, second)
     }
   end
 
@@ -194,7 +199,7 @@ defmodule Plausible.Billing do
   end
 
   def usage_breakdown(user) do
-    domains = Plausible.Sites.owned_by(user) |> Enum.map(& &1.domain)
+    domains = Plausible.Sites.owned_sites_domains(user)
     Plausible.Stats.Clickhouse.usage_breakdown(domains)
   end
 
@@ -266,7 +271,8 @@ defmodule Plausible.Billing do
         new_allowance = Plausible.Billing.Plans.allowance(user.subscription)
 
         if new_allowance > allowance_required do
-          Plausible.Auth.User.remove_grace_period(user)
+          user
+          |> Plausible.Auth.GracePeriod.remove_changeset()
           |> Repo.update()
         else
           {:ok, user}

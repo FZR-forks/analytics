@@ -5,6 +5,7 @@ All notable changes to this project will be documented in this file.
 ## Unreleased
 
 ### Added
+- An upper bound of 1000 to the `limit` parameter in Stats API
 - The `exclusions` script extension now also takes a `data-include` attribute tag
 - A `file-downloads` script extension for automatically tracking file downloads as custom events
 - Integration with [Matomo's referrer spam list](https://github.com/matomo-org/referrer-spam-list/blob/master/spammers.txt) to block known spammers
@@ -30,8 +31,14 @@ All notable changes to this project will be documented in this file.
 - Filter goals in realtime filter by clicking goal name
 - The time format (12 hour or 24 hour) for graph timelines is now presented based on the browser's defined language
 - Choice of metric for main-graph both in UI and API (visitors, pageviews, bounce_rate, visit_duration) plausible/analytics#1364
+- New width=manual mode for embedded dashboards plausible/analytics#2148
+- Add more timezone options
+- Add new strategy to recommend timezone when creating a new site
+- Alert outgrown enterprise users of their usage plausible/analytics#2197
+- Manually lock and unlock enterprise users plausible/analytics#2197
 
 ### Fixed
+- Hash part of the URL can now be used when excluding pages with `script.exclusions.hash.js`.
 - UI fix where multi-line text in pills would not be underlined properly on small screens.
 - UI fix to align footer columns
 - Guests can now use the favicon to toggle additional info about the site bing viewed (such as in public embeds).
@@ -40,6 +47,9 @@ All notable changes to this project will be documented in this file.
 - The exported `pages.csv` file now includes pageviews again [plausible/analytics#1878](https://github.com/plausible/analytics/issues/1878)
 - Fix a bug where city, region and country filters were filtering stats but not the location list
 - Fix a bug where regions were not being saved
+- Timezone offset labels now update with time changes
+- Render 404 if shared link auth cannot be verified [plausible/analytics#2225](https://github.com/plausible/analytics/pull/2225)
+- Restore compatibility with older format of shared links [plausible/analytics#2225](https://github.com/plausible/analytics/pull/2225)
 
 ### Changed
 - Cache the tracking script for 24 hours
@@ -48,6 +58,7 @@ All notable changes to this project will be documented in this file.
 - Remove the `+ Add Site` link to the site-switcher dropdown in the dashboard.
 - `DISABLE_REGISTRATIONS` configuration parameter can now accept `invite_only` to allow invited users to register an account while keeping regular registrations disabled plausible/analytics#1841
 - New and improved Session tracking module for higher throughput and lower latency. [PR#1934](https://github.com/plausible/analytics#1934)
+- Do not display ZZ country code in countries report [PR#1934](https://github.com/plausible/analytics#2223)
 
 ## v1.4.1
 

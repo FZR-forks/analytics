@@ -50,14 +50,12 @@ defmodule PlausibleWeb.SiteController do
   end
 
   def new(conn, _params) do
-    current_user = conn.assigns[:current_user] |> Repo.preload(site_memberships: :site)
+    current_user = conn.assigns[:current_user]
 
-    owned_site_count =
-      current_user.site_memberships |> Enum.filter(fn m -> m.role == :owner end) |> Enum.count()
-
+    owned_site_count = Plausible.Sites.owned_sites_count(current_user)
     site_limit = Plausible.Billing.sites_limit(current_user)
     is_at_limit = site_limit && owned_site_count >= site_limit
-    is_first_site = Enum.empty?(current_user.site_memberships)
+    is_first_site = owned_site_count == 0
 
     changeset = Plausible.Site.changeset(%Plausible.Site{})
 
@@ -72,7 +70,7 @@ defmodule PlausibleWeb.SiteController do
 
   def create_site(conn, %{"site" => site_params}) do
     user = conn.assigns[:current_user]
-    site_count = Enum.count(Plausible.Sites.owned_by(user))
+    site_count = Plausible.Sites.owned_sites_count(user)
     is_first_site = site_count == 0
 
     case Sites.create(user, site_params) do
@@ -654,7 +652,7 @@ defmodule PlausibleWeb.SiteController do
 
   def import_from_google_view_id_form(conn, %{"access_token" => access_token}) do
     site = conn.assigns[:site]
-    view_ids = Plausible.Google.Api.get_analytics_view_ids(access_token)
+    view_ids = Plausible.Google.Api.list_views(access_token)
 
     conn
     |> assign(:skip_plausible_tracking, true)
@@ -675,7 +673,7 @@ defmodule PlausibleWeb.SiteController do
     case start_date do
       {:ok, nil} ->
         site = conn.assigns[:site]
-        view_ids = Plausible.Google.Api.get_analytics_view_ids(access_token)
+        view_ids = Plausible.Google.Api.list_views(access_token)
 
         conn
         |> assign(:skip_plausible_tracking, true)
@@ -716,8 +714,7 @@ defmodule PlausibleWeb.SiteController do
     end_date =
       Plausible.Stats.Clickhouse.pageview_start_date_local(site) || Timex.today(site.timezone)
 
-    {:ok, view_ids} = Plausible.Google.Api.get_analytics_view_ids(access_token)
-    {view_id_name, _} = Enum.find(view_ids, fn {_, v} -> v == view_id end)
+    {:ok, {view_name, view_id}} = Plausible.Google.Api.get_view(access_token, view_id)
 
     conn
     |> assign(:skip_plausible_tracking, true)
@@ -725,7 +722,7 @@ defmodule PlausibleWeb.SiteController do
       access_token: access_token,
       site: site,
       selected_view_id: view_id,
-      selected_view_id_name: view_id_name,
+      selected_view_id_name: view_name,
       start_date: start_date,
       end_date: end_date,
       layout: {PlausibleWeb.LayoutView, "focus.html"}

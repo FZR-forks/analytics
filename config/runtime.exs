@@ -212,12 +212,6 @@ else
     database: get_var_from_path_or_env(config_dir, "DATABASE_NAME", "plausible")
 end
 
-config :fun_with_flags, :cache_bust_notifications, enabled: false
-
-config :fun_with_flags, :persistence,
-  adapter: FunWithFlags.Store.Persistent.Ecto,
-  repo: Plausible.Repo
-
 included_environments = if sentry_dsn, do: ["prod", "staging", "dev"], else: []
 
 config :sentry,
@@ -243,6 +237,8 @@ config :plausible, :paddle,
 config :plausible, :google,
   client_id: google_cid,
   client_secret: google_secret,
+  api_url: "https://www.googleapis.com",
+  reporting_api_url: "https://analyticsreporting.googleapis.com",
   max_buffer_size: get_int_from_path_or_env(config_dir, "GOOGLE_MAX_BUFFER_SIZE", 10_000)
 
 config :plausible, Plausible.ClickhouseRepo,
@@ -369,12 +365,6 @@ end
 config :plausible, :hcaptcha,
   sitekey: hcaptcha_sitekey,
   secret: hcaptcha_secret
-
-config :plausible, Plausible.Finch,
-  default_pool_size: get_int_from_path_or_env(config_dir, "DEFAULT_FINCH_POOL_SIZE", 50),
-  default_pool_count: get_int_from_path_or_env(config_dir, "DEFAULT_FINCH_POOL_COUNT", 1),
-  sentry_pool_size: get_int_from_path_or_env(config_dir, "SENTRY_FINCH_POOL_SIZE", 50),
-  sentry_pool_count: get_int_from_path_or_env(config_dir, "SENTRY_FINCH_POOL_COUNT", 1)
 
 config :plausible, Plausible.Sentry.Client,
   finch_request_opts: [

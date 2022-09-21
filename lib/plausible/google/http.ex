@@ -1,4 +1,7 @@
 defmodule Plausible.Google.HTTP do
+  require Logger
+  alias Plausible.HTTPClient
+
   @spec get_report(module(), Plausible.Google.ReportRequest.t()) ::
           {:ok, {[map()], String.t() | nil}} | {:error, any()}
   def get_report(http_client, %Plausible.Google.ReportRequest{} = report_request) do
@@ -27,64 +30,128 @@ defmodule Plausible.Google.HTTP do
     response =
       :post
       |> Finch.build(
-        "https://analyticsreporting.googleapis.com/v4/reports:batchGet",
+        "#{reporting_api_url()}/v4/reports:batchGet",
         [{"Authorization", "Bearer #{report_request.access_token}"}],
         params
       )
       |> http_client.request(Plausible.Finch)
 
     with {:ok, %{status: 200, body: body}} <- response,
-         {:ok, %{"reports" => [report | _]}} <- Jason.decode(body),
+         {:ok, report} <- parse_report_from_response(body),
          token <- Map.get(report, "nextPageToken"),
-         report <- convert_to_maps(report) do
+         {:ok, report} <- convert_to_maps(report) do
       {:ok, {report, token}}
+    else
+      {:ok, %{status: _non_http_200, body: body}} ->
+        Sentry.Context.set_extra_context(%{google_analytics_response: body})
+        {:error, :request_failed}
+
+      {:error, cause} ->
+        {:error, cause}
+    end
+  end
+
+  defp parse_report_from_response(raw_body) do
+    with {:ok, map} <- Jason.decode(raw_body),
+         %{"reports" => [report | _]} <- map do
+      {:ok, report}
+    else
+      {:error, cause} ->
+        Logger.error("Google Analytics: Failed to parse JSON. Reason: #{inspect(cause)}")
+        Sentry.Context.set_extra_context(%{google_analytics_response: raw_body})
+        {:error, cause}
+
+      %{} = response ->
+        Logger.error(
+          "Google Analytics: Failed to find report in response. Reason: #{inspect(response)}"
+        )
+
+        Sentry.Context.set_extra_context(%{google_analytics_response: response})
+        {:error, {:invalid_response, response}}
     end
   end
 
   defp convert_to_maps(%{
-         "data" => %{"rows" => rows},
+         "data" => %{} = data,
          "columnHeader" => %{
            "dimensions" => dimension_headers,
            "metricHeader" => %{"metricHeaderEntries" => metric_headers}
          }
        }) do
     metric_headers = Enum.map(metric_headers, & &1["name"])
+    rows = Map.get(data, "rows", [])
 
-    Enum.map(rows, fn %{"dimensions" => dimensions, "metrics" => [%{"values" => metrics}]} ->
-      metrics = Enum.zip(metric_headers, metrics)
-      dimensions = Enum.zip(dimension_headers, dimensions)
-      %{metrics: Map.new(metrics), dimensions: Map.new(dimensions)}
-    end)
+    report =
+      Enum.map(rows, fn %{"dimensions" => dimensions, "metrics" => [%{"values" => metrics}]} ->
+        metrics = Enum.zip(metric_headers, metrics)
+        dimensions = Enum.zip(dimension_headers, dimensions)
+        %{metrics: Map.new(metrics), dimensions: Map.new(dimensions)}
+      end)
+
+    {:ok, report}
+  end
+
+  defp convert_to_maps(response) do
+    Logger.error(
+      "Google Analytics: Failed to read report in response. Reason: #{inspect(response)}"
+    )
+
+    Sentry.Context.set_extra_context(%{google_analytics_response: response})
+    {:error, {:invalid_response, response}}
   end
 
   def list_sites(access_token) do
-    "https://www.googleapis.com/webmasters/v3/sites"
-    |> HTTPoison.get!("Content-Type": "application/json", Authorization: "Bearer #{access_token}")
-    |> Map.get(:body)
-    |> Jason.decode!()
-    |> then(&{:ok, &1})
+    url = "#{api_url()}/webmasters/v3/sites"
+    headers = [{"Content-Type", "application/json"}, {"Authorization", "Bearer #{access_token}"}]
+
+    case HTTPClient.get(url, headers) do
+      {:ok, response} ->
+        response
+        |> Map.get(:body)
+        |> Jason.decode!()
+        |> then(&{:ok, &1})
+
+      {:error, reason} = e ->
+        Logger.error("Google Analytics: failed to list sites: #{inspect(reason)}")
+        e
+    end
   end
 
   def fetch_access_token(code) do
-    "https://www.googleapis.com/oauth2/v4/token"
-    |> HTTPoison.post!(
-      "client_id=#{client_id()}&client_secret=#{client_secret()}&code=#{code}&grant_type=authorization_code&redirect_uri=#{redirect_uri()}",
-      "Content-Type": "application/x-www-form-urlencoded"
-    )
+    url = "#{api_url()}/oauth2/v4/token"
+    headers = [{"Content-Type", "application/x-www-form-urlencoded"}]
+
+    params = %{
+      client_id: client_id(),
+      client_secret: client_secret(),
+      code: code,
+      grant_type: :authorization_code,
+      redirect_uri: redirect_uri()
+    }
+
+    {:ok, response} = HTTPClient.post(url, headers, params)
+
+    response
     |> Map.get(:body)
     |> Jason.decode!()
   end
 
   def list_views_for_user(access_token) do
-    "https://www.googleapis.com/analytics/v3/management/accounts/~all/webproperties/~all/profiles"
-    |> HTTPoison.get!(Authorization: "Bearer #{access_token}")
-    |> case do
-      %{body: body, status_code: 200} ->
+    url = "#{api_url()}/analytics/v3/management/accounts/~all/webproperties/~all/profiles"
+
+    headers = [{"Authorization", "Bearer #{access_token}"}]
+
+    case HTTPClient.get(url, headers) do
+      {:ok, %Finch.Response{body: body, status: 200}} ->
         {:ok, Jason.decode!(body)}
 
-      %{body: body} ->
-        Sentry.capture_message("Error fetching Google view ID", extra: Jason.decode!(body))
+      {:error, %{reason: %Finch.Response{body: body}}} ->
+        Sentry.capture_message("Error fetching Google view ID", extra: %{body: inspect(body)})
         {:error, body}
+
+      {:error, %{reason: reason} = e} ->
+        Sentry.capture_message("Error fetching Google view ID", extra: %{error: inspect(e)})
+        {:error, reason}
     end
   end
 
@@ -99,37 +166,35 @@ defmodule Plausible.Google.HTTP do
         %{}
       end
 
-    params =
-      Jason.encode!(%{
-        startDate: Date.to_iso8601(date_range.first),
-        endDate: Date.to_iso8601(date_range.last),
-        dimensions: ["query"],
-        rowLimit: limit,
-        dimensionFilterGroups: filter_groups
-      })
+    params = %{
+      startDate: Date.to_iso8601(date_range.first),
+      endDate: Date.to_iso8601(date_range.last),
+      dimensions: ["query"],
+      rowLimit: limit,
+      dimensionFilterGroups: filter_groups
+    }
 
-    :post
-    |> Finch.build(
-      "https://www.googleapis.com/webmasters/v3/sites/#{property}/searchAnalytics/query",
-      [{"Authorization", "Bearer #{access_token}"}],
-      params
-    )
-    |> Finch.request(Plausible.Finch)
-    |> case do
-      {:ok, %{status: 200, body: body}} ->
+    url = "#{api_url()}/webmasters/v3/sites/#{property}/searchAnalytics/query"
+    headers = [{"Authorization", "Bearer #{access_token}"}]
+
+    case HTTPClient.post(url, headers, params) do
+      {:ok, %Finch.Response{body: body, status: 200}} ->
         {:ok, Jason.decode!(body)}
 
-      {:ok, %{status: 401, body: body}} ->
-        Sentry.capture_message("Error fetching Google queries", extra: Jason.decode!(body))
+      {:error, %{reason: %Finch.Response{body: body, status: 401}}} ->
+        Sentry.capture_message("Error fetching Google queries", extra: %{body: inspect(body)})
         {:error, :invalid_credentials}
 
-      {:ok, %{status: 403, body: body}} ->
-        body = Jason.decode!(body)
-        Sentry.capture_message("Error fetching Google queries", extra: body)
+      {:error, %{reason: %Finch.Response{body: body, status: 403}}} ->
+        Sentry.capture_message("Error fetching Google queries", extra: %{body: inspect(body)})
         {:error, get_in(body, ["error", "message"])}
 
-      {:ok, %{body: body}} ->
-        Sentry.capture_message("Error fetching Google queries", extra: Jason.decode!(body))
+      {:error, %{reason: %Finch.Response{body: body}}} ->
+        Sentry.capture_message("Error fetching Google queries", extra: %{body: inspect(body)})
+        {:error, :unknown}
+
+      {:error, %{reason: _} = e} ->
+        Sentry.capture_message("Error fetching Google queries", extra: %{error: inspect(e)})
         {:error, :unknown}
     end
   end
@@ -138,52 +203,57 @@ defmodule Plausible.Google.HTTP do
   defp property_base_url(url), do: url
 
   def refresh_auth_token(refresh_token) do
-    "https://www.googleapis.com/oauth2/v4/token"
-    |> HTTPoison.post!(
-      "client_id=#{client_id()}&client_secret=#{client_secret()}&refresh_token=#{refresh_token}&grant_type=refresh_token&redirect_uri=#{redirect_uri()}",
-      "Content-Type": "application/x-www-form-urlencoded"
-    )
-    |> case do
-      %{body: body, status_code: 200} ->
+    url = "#{api_url()}/oauth2/v4/token"
+    headers = [{"content-type", "application/x-www-form-urlencoded"}]
+
+    params = %{
+      client_id: client_id(),
+      client_secret: client_secret(),
+      refresh_token: refresh_token,
+      grant_type: :refresh_token,
+      redirect_uri: redirect_uri()
+    }
+
+    case HTTPClient.post(url, headers, params) do
+      {:ok, %Finch.Response{body: body, status: 200}} ->
         {:ok, Jason.decode!(body)}
 
-      %{body: body} ->
+      {:error, %{reason: %Finch.Response{body: body, status: _non_http_200}}} ->
         body
-        |> Jason.decode!(body)
+        |> Jason.decode!()
         |> Map.get("error")
         |> then(&{:error, &1})
+
+      {:error, %{reason: _} = e} ->
+        Sentry.capture_message("Error fetching Google queries", extra: %{error: inspect(e)})
+        {:error, :unknown}
     end
   end
 
   @earliest_valid_date "2005-01-01"
   def get_analytics_start_date(view_id, access_token) do
-    params =
-      Jason.encode!(%{
-        reportRequests: [
-          %{
-            viewId: view_id,
-            dateRanges: [
-              %{startDate: @earliest_valid_date, endDate: Date.to_iso8601(Timex.today())}
-            ],
-            dimensions: [%{name: "ga:date", histogramBuckets: []}],
-            metrics: [%{expression: "ga:pageviews"}],
-            hideTotals: true,
-            hideValueRanges: true,
-            orderBys: [%{fieldName: "ga:date", sortOrder: "ASCENDING"}],
-            pageSize: 1
-          }
-        ]
-      })
+    params = %{
+      reportRequests: [
+        %{
+          viewId: view_id,
+          dateRanges: [
+            %{startDate: @earliest_valid_date, endDate: Date.to_iso8601(Timex.today())}
+          ],
+          dimensions: [%{name: "ga:date", histogramBuckets: []}],
+          metrics: [%{expression: "ga:pageviews"}],
+          hideTotals: true,
+          hideValueRanges: true,
+          orderBys: [%{fieldName: "ga:date", sortOrder: "ASCENDING"}],
+          pageSize: 1
+        }
+      ]
+    }
 
-    "https://analyticsreporting.googleapis.com/v4/reports:batchGet"
-    |> HTTPoison.post!(
-      params,
-      [Authorization: "Bearer #{access_token}"],
-      timeout: 15_000,
-      recv_timeout: 15_000
-    )
-    |> case do
-      %{status_code: 200, body: body} ->
+    url = "#{reporting_api_url()}/v4/reports:batchGet"
+    headers = [{"Authorization", "Bearer #{access_token}"}]
+
+    case HTTPClient.post(url, headers, params) do
+      {:ok, %Finch.Response{body: body, status: 200}} ->
         report = List.first(Jason.decode!(body)["reports"])
 
         date =
@@ -197,14 +267,20 @@ defmodule Plausible.Google.HTTP do
 
         {:ok, date}
 
-      %{body: body} ->
-        Sentry.capture_message("Error fetching Google view ID", extra: Jason.decode!(body))
+      {:error, %{reason: %Finch.Response{body: body}}} ->
+        Sentry.capture_message("Error fetching Google view ID", extra: %{body: inspect(body)})
         {:error, body}
+
+      {:error, %{reason: reason} = e} ->
+        Sentry.capture_message("Error fetching Google view ID", extra: %{error: inspect(e)})
+        {:error, reason}
     end
   end
 
   defp config, do: Application.get_env(:plausible, :google)
   defp client_id, do: Keyword.fetch!(config(), :client_id)
   defp client_secret, do: Keyword.fetch!(config(), :client_secret)
+  defp reporting_api_url, do: Keyword.fetch!(config(), :reporting_api_url)
+  defp api_url, do: Keyword.fetch!(config(), :api_url)
   defp redirect_uri, do: PlausibleWeb.Endpoint.url() <> "/auth/google/callback"
 end

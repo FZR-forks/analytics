@@ -48,6 +48,7 @@ export const METRIC_FORMATTER = {
 class LineGraph extends React.Component {
   constructor(props) {
     super(props);
+    this.boundary = React.createRef()
     this.regenerateChart = this.regenerateChart.bind(this);
     this.updateWindowDimensions =  this.updateWindowDimensions.bind(this);
     this.state = {
@@ -291,8 +292,8 @@ class LineGraph extends React.Component {
 
     return (
       <div className="graph-inner">
-        <div className="flex flex-wrap">
-          <TopStats query={query} metric={metric} updateMetric={updateMetric} topStatData={topStatData}/>
+        <div className="flex flex-wrap" ref={this.boundary}>
+          <TopStats query={query} metric={metric} updateMetric={updateMetric} topStatData={topStatData} tooltipBoundary={this.boundary.current} />
         </div>
         <div className="relative px-2">
           <div className="absolute right-4 -top-10 flex">
